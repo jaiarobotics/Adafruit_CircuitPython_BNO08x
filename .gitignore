@@ -46,3 +46,6 @@ _build
 .idea
 .vscode
 *~
+
+# This dir results from running `pip install .`
+build/
