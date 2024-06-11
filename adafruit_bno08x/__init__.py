@@ -31,16 +31,17 @@ __version__ = "0.0.0+auto.0"
 __repo__ = "https:# github.com/adafruit/Adafruit_CircuitPython_BNO08x.git"
 
 from struct import unpack_from, pack_into
-from collections import namedtuple
+from collections import namedtuple, deque
 import time
 from micropython import const
+from dataclasses import dataclass
 
 # TODO: Remove on release
 from .debug import channels, reports
 
 # For IDE type recognition
 try:
-    from typing import Any, Dict, List, Optional, Tuple, Union
+    from typing import Any, Dict, List, Optional, Tuple, Union, Deque
     from digitalio import DigitalInOut
 except ImportError:
     pass
@@ -485,6 +486,13 @@ class Packet:
         return False
 
 
+@dataclass
+class Accuracies:
+    magnetometer: int
+    gyroscope: int
+    accelerometer: int
+
+
 class BNO08X:  # pylint: disable=too-many-instance-attributes, too-many-public-methods
     """Library for the BNO08x IMUs from Hillcrest Laboratories
 
@@ -500,7 +508,7 @@ class BNO08X:  # pylint: disable=too-many-instance-attributes, too-many-public-m
         self._dbg("********** __init__ *************")
         self._data_buffer: bytearray = bytearray(DATA_BUFFER_SIZE)
         self._command_buffer: bytearray = bytearray(12)
-        self._packet_slices: List[Any] = []
+        self._packet_slices: Deque[Any] = Deque()
 
         # TODO: this is wrong there should be one per channel per direction
         self._sequence_number: List[int] = [0, 0, 0, 0, 0, 0]
@@ -508,12 +516,12 @@ class BNO08X:  # pylint: disable=too-many-instance-attributes, too-many-public-m
         self._dcd_saved_at: float = -1
         self._me_calibration_started_at: float = -1.0
         self._calibration_complete = False
-        self._magnetometer_accuracy = 0
         self._wait_for_initialize = True
         self._init_complete = False
         self._id_read = False
         # for saving the most recent reading when decoding several packets
         self._readings: Dict[int, Any] = {}
+        self._accuracies = Accuracies(0, 0, 0)
         self.initialize()
 
     def initialize(self) -> None:
@@ -737,22 +745,9 @@ class BNO08X:  # pylint: disable=too-many-instance-attributes, too-many-public-m
         self._calibration_complete = False
 
     @property
-    def calibration_status(self) -> int:
+    def accuracies(self) -> Accuracies:
         """Get the status of the self-calibration"""
-        self._send_me_command(
-            [
-                0,  # calibrate accel
-                0,  # calibrate gyro
-                0,  # calibrate mag
-                _ME_GET_CAL,
-                0,  # calibrate planar acceleration
-                0,  # 'on_table' calibration
-                0,  # reserved
-                0,  # reserved
-                0,  # reserved
-            ]
-        )
-        return self._magnetometer_accuracy
+        return self._accuracies
 
     def _send_me_command(self, subcommand_params: Optional[List[int]]) -> None:
         start_time = time.monotonic()
@@ -857,7 +852,7 @@ class BNO08X:  # pylint: disable=too-many-instance-attributes, too-many-public-m
         try:
             _separate_batch(packet, self._packet_slices)
             while len(self._packet_slices) > 0:
-                self._process_report(*self._packet_slices.pop())
+                self._process_report(*self._packet_slices.popleft())
         except Exception as error:
             print(packet)
             raise error
@@ -949,10 +944,11 @@ class BNO08X:  # pylint: disable=too-many-instance-attributes, too-many-public-m
             return
         sensor_data, accuracy = _parse_sensor_report_data(report_bytes)
         if report_id == BNO_REPORT_MAGNETOMETER:
-            self._magnetometer_accuracy = accuracy
-        # TODO: FIXME; Sensor reports are batched in a LIFO which means that multiple reports
-        # for the same type will end with the oldest/last being kept and the other
-        # newer reports thrown away
+            self._accuracies.magnetometer = accuracy
+        if report_id == BNO_REPORT_ACCELEROMETER:
+            self._accuracies.accelerometer = accuracy
+        if report_id == BNO_REPORT_GYROSCOPE:
+            self._accuracies.gyroscope = accuracy
         self._readings[report_id] = sensor_data
 
     # TODO: Make this a Packet creation
